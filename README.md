@@ -4,6 +4,14 @@
 
 ## 대시보드 실행
 
+처음 클론한 경우 먼저 가상환경을 만들고 패키지를 설치합니다.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env
+```
+
 Windows에서 `run_dashboard.bat`를 더블클릭하면 Tkinter 대시보드가 활성화됩니다.
 
 대시보드에서 할 수 있는 일:
