@@ -131,6 +131,20 @@ def fetch_location_range(session_key: int, start: datetime, end: datetime) -> li
         raise
 
 
+def fetch_car_data_range(session_key: int, start: datetime, end: datetime) -> list[dict]:
+    try:
+        return api_get("car_data", {
+            "session_key": session_key,
+            "date>=": format_api_date(start),
+            "date<": format_api_date(end),
+        })
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
 def fetch_position_range(session_key: int, start: datetime, end: datetime) -> list[dict]:
     try:
         return api_get("position", {

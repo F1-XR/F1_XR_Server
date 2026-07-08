@@ -78,6 +78,13 @@ class LocationSample(BaseModel):
     x: float
     y: float
     z: float
+    rpm: float = 0.0
+    throttle: float = 0.0
+    speed: float = 0.0
+    nGear: int = 0
+    n_gear: int = 0
+    brake: int = 0
+    drs: int = 0
 
 
 class PositionSample(BaseModel):

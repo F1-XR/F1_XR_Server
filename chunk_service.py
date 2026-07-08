@@ -6,6 +6,7 @@ from math import ceil
 
 from models import CreateDatasetRequest, DatasetManifest, ReplayChunk
 from openf1_client import (
+    fetch_car_data_range,
     fetch_drivers,
     fetch_laps,
     fetch_location_range,
@@ -23,6 +24,10 @@ from storage import (
     save_manifest,
     save_raw,
 )
+
+
+MAX_TELEMETRY_GAP_SECONDS = 1.0
+ENGINE_SAMPLE_FIELDS = ("rpm", "throttle", "speed", "nGear", "n_gear", "brake", "drs")
 
 
 def normalize_slug(value: str) -> str:
@@ -81,17 +86,20 @@ def build_replay_chunk(
     overlap_seconds: int,
     replay_start_time,
     locations: list[dict],
+    car_data: list[dict],
     positions: list[dict],
     tires: list[dict],
 ) -> dict:
     samples = []
+    car_data_by_driver = build_car_data_index(replay_start_time, car_data)
 
     seen = set()
 
     for row in locations:
+        driver_number = int(row["driver_number"])
         key = (
             row.get("session_key"),
-            row.get("driver_number"),
+            driver_number,
             row.get("date"),
             row.get("x"),
             row.get("y"),
@@ -105,13 +113,21 @@ def build_replay_chunk(
 
         sample_time = parse_iso(row["date"])
         t = (sample_time - replay_start_time).total_seconds()
+        telemetry = find_nearest_car_data(car_data_by_driver.get(driver_number, []), t)
 
         samples.append({
             "t": round(t, 3),
-            "driverNumber": int(row["driver_number"]),
+            "driverNumber": driver_number,
             "x": float(row["x"]),
             "y": float(row["y"]),
             "z": float(row["z"]),
+            "rpm": float(telemetry.get("rpm", 0.0)),
+            "throttle": float(telemetry.get("throttle", 0.0)),
+            "speed": float(telemetry.get("speed", 0.0)),
+            "nGear": int(telemetry.get("n_gear", 0)),
+            "n_gear": int(telemetry.get("n_gear", 0)),
+            "brake": int(telemetry.get("brake", 0)),
+            "drs": int(telemetry.get("drs", 0)),
         })
 
     samples.sort(key=lambda item: (item["driverNumber"], item["t"]))
@@ -301,7 +317,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
     if chunk_exists(dataset_id, chunk_index):
         chunk_data = load_chunk(dataset_id, chunk_index)
 
-        if "tires" in chunk_data:
+        if chunk_has_required_fields(chunk_data):
             sample_count = len(chunk_data.get("samples", []))
             manifest["chunks"][chunk_index]["status"] = "ready" if sample_count > 0 else "empty"
             manifest["chunks"][chunk_index]["sampleCount"] = sample_count
@@ -349,8 +365,15 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
             end=request_end_time,
         )
 
+        car_data = fetch_car_data_range(
+            session_key=session_key,
+            start=request_start_time,
+            end=request_end_time,
+        )
+
         save_raw(dataset_id, f"position_chunk_{chunk_index:04d}", positions)
         save_raw(dataset_id, f"location_chunk_{chunk_index:04d}", locations)
+        save_raw(dataset_id, f"car_data_chunk_{chunk_index:04d}", car_data)
 
         replay_chunk = build_replay_chunk(
             dataset_id=dataset_id,
@@ -360,6 +383,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
             overlap_seconds=overlap,
             replay_start_time=replay_start_time,
             locations=locations,
+            car_data=car_data,
             positions=positions,
             tires=build_tire_samples(
                 replay_start_time=replay_start_time,
@@ -411,7 +435,7 @@ def sync_existing_chunks(dataset_id: str, manifest: dict) -> None:
 
         chunk_data = load_chunk(dataset_id, index)
 
-        if "tires" not in chunk_data:
+        if not chunk_has_required_fields(chunk_data):
             chunk["status"] = "pending"
             chunk["sampleCount"] = 0
             chunk["error"] = None
@@ -424,6 +448,93 @@ def sync_existing_chunks(dataset_id: str, manifest: dict) -> None:
 
     update_ready_until(manifest)
     update_playback_start(dataset_id, manifest)
+
+
+def chunk_has_required_fields(chunk_data: dict) -> bool:
+    if "tires" not in chunk_data:
+        return False
+
+    samples = chunk_data.get("samples", [])
+    if not samples:
+        return True
+
+    return all(field in samples[0] for field in ENGINE_SAMPLE_FIELDS)
+
+
+def build_car_data_index(replay_start_time, car_data: list[dict]) -> dict[int, list[dict]]:
+    samples_by_driver: dict[int, list[dict]] = {}
+    seen = set()
+
+    for row in car_data:
+        if row.get("date") is None or row.get("driver_number") is None:
+            continue
+
+        driver_number = int(row["driver_number"])
+        key = (driver_number, row.get("date"))
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        sample_time = parse_iso(row["date"])
+        t = (sample_time - replay_start_time).total_seconds()
+
+        samples_by_driver.setdefault(driver_number, []).append({
+            "t": t,
+            "rpm": safe_float(row.get("rpm")),
+            "throttle": safe_float(row.get("throttle")),
+            "speed": safe_float(row.get("speed")),
+            "n_gear": safe_int(row.get("n_gear")),
+            "brake": safe_int(row.get("brake")),
+            "drs": safe_int(row.get("drs")),
+        })
+
+    for samples in samples_by_driver.values():
+        samples.sort(key=lambda item: item["t"])
+
+    return samples_by_driver
+
+
+def find_nearest_car_data(samples: list[dict], t: float) -> dict:
+    if not samples:
+        return {}
+
+    low = 0
+    high = len(samples) - 1
+
+    while low < high:
+        mid = (low + high) // 2
+
+        if samples[mid]["t"] < t:
+            low = mid + 1
+        else:
+            high = mid
+
+    candidates = [samples[low]]
+
+    if low > 0:
+        candidates.append(samples[low - 1])
+
+    nearest = min(candidates, key=lambda item: abs(item["t"] - t))
+
+    if abs(nearest["t"] - t) > MAX_TELEMETRY_GAP_SECONDS:
+        return {}
+
+    return nearest
+
+
+def safe_float(value) -> float:
+    if value is None:
+        return 0.0
+
+    return float(value)
+
+
+def safe_int(value) -> int:
+    if value is None:
+        return 0
+
+    return int(value)
 
 
 def update_ready_until(manifest: dict) -> None:
