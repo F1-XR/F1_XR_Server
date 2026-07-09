@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import time
@@ -152,6 +152,16 @@ def fetch_position_range(session_key: int, start: datetime, end: datetime) -> li
             "date>=": format_api_date(start),
             "date<": format_api_date(end),
         })
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_race_control(session_key: int) -> list[dict]:
+    try:
+        return api_get("race_control", {"session_key": session_key})
     except HTTPError as exc:
         if exc.code == 404:
             return []

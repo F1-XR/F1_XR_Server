@@ -10,7 +10,8 @@ from openf1_client import (
     fetch_drivers,
     fetch_laps,
     fetch_location_range,
-    fetch_position_range, 
+    fetch_position_range,
+    fetch_race_control,
     fetch_session_by_key,
     fetch_stints,
     parse_iso,
@@ -144,6 +145,90 @@ def build_replay_chunk(
     ).model_dump()
 
 
+
+def race_control_t(session_start, row: dict) -> float | None:
+    date = row.get("date")
+    if not date:
+        return None
+
+    return max(0.0, (parse_iso(date) - session_start).total_seconds())
+
+
+def race_control_event(session_start, row: dict) -> dict | None:
+    t = race_control_t(session_start, row)
+    if t is None:
+        return None
+
+    sector = row.get("sector")
+    return {
+        "t": round(t, 3),
+        "date": str(row.get("date", "")),
+        "category": row.get("category"),
+        "flag": row.get("flag"),
+        "scope": row.get("scope"),
+        "sector": int(sector) if sector is not None else None,
+        "message": row.get("message"),
+    }
+
+
+def find_race_start_t(session_start, race_control: list[dict], laps: list[dict]) -> float:
+    candidates = []
+
+    for row in race_control:
+        message = str(row.get("message") or "").upper()
+        flag = str(row.get("flag") or "").upper()
+        category = str(row.get("category") or "").upper()
+
+        is_start = (
+            "RACE START" in message
+            or "STARTED" in message
+            or ("GREEN FLAG" in message and "FORMATION" not in message)
+            or (flag == "GREEN" and category == "FLAG" and "PIT EXIT" not in message)
+        )
+
+        if not is_start:
+            continue
+
+        t = race_control_t(session_start, row)
+        if t is not None:
+            candidates.append(t)
+
+    if candidates:
+        return min(candidates)
+
+    return find_first_lap_start_t(session_start, laps)
+
+
+def build_race_control_summary(session_start, race_control: list[dict]) -> tuple[float | None, list[dict], list[dict]]:
+    race_end_t = None
+    yellow_flags = []
+    red_flags = []
+
+    for row in race_control:
+        message = str(row.get("message") or "").upper()
+        flag = str(row.get("flag") or "").upper()
+        event = race_control_event(session_start, row)
+
+        if event is None:
+            continue
+
+        if flag in ("YELLOW", "DOUBLE YELLOW") or "YELLOW FLAG" in message:
+            yellow_flags.append(event)
+
+        if flag == "RED" or "RED FLAG" in message:
+            red_flags.append(event)
+
+        is_end = (
+            "CHEQUERED" in message
+            or "CHECKERED" in message
+            or "SESSION ENDED" in message
+            or "RACE FINISHED" in message
+        )
+        if is_end and (race_end_t is None or event["t"] < race_end_t):
+            race_end_t = event["t"]
+
+    return race_end_t, yellow_flags, red_flags
+
 def create_dataset(request: CreateDatasetRequest) -> dict:
     try:
         return create_dataset_from_openf1(request)
@@ -216,7 +301,10 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
     drivers = fetch_drivers(request.sessionKey)
     laps = fetch_laps(request.sessionKey)
     stints = fetch_stints(request.sessionKey)
-    playback_start_t = find_first_lap_start_t(session_start, laps) if request.skipWarmupLap else 0.0
+    race_control = fetch_race_control(request.sessionKey)
+    race_start_t = find_race_start_t(session_start, race_control, laps)
+    race_end_t, yellow_flags, red_flags = build_race_control_summary(session_start, race_control)
+    playback_start_t = max(0.0, race_start_t - float(request.preStartSeconds)) if request.skipWarmupLap else 0.0
     duration_seconds = max(0.0, (session_end - session_start).total_seconds())
     requested_duration_seconds = min(
         duration_seconds,
@@ -233,6 +321,7 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
     save_raw(dataset_id, "drivers", drivers)
     save_raw(dataset_id, "laps", laps)
     save_raw(dataset_id, "stints", stints)
+    save_raw(dataset_id, "race_control", race_control)
     save_raw(dataset_id, "transform", build_transform_config(session))
 
     chunks = []
@@ -267,6 +356,10 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
         readyUntilT=0.0,
         playbackStartChunkIndex=playback_start_chunk_index,
         playbackStartT=round(playback_start_t, 3),
+        raceStartT=round(race_start_t, 3),
+        raceEndT=round(race_end_t, 3) if race_end_t is not None else None,
+        yellowFlags=yellow_flags,
+        redFlags=red_flags,
         chunks=chunks,
     ).model_dump()
 

@@ -32,6 +32,7 @@ class CreateDatasetRequest(BaseModel):
     initialChunks: int = Field(default=1, ge=1, le=10)
     prefetchChunks: int = Field(default=2, ge=0, le=10)
     requestedMinutes: int = Field(default=6, ge=1, le=240)
+    preStartSeconds: int = Field(default=13, ge=0, le=120)
     skipWarmupLap: bool = True
 
 
@@ -42,6 +43,16 @@ class ChunkInfo(BaseModel):
     status: str
     sampleCount: int = 0
     error: str | None = None
+
+
+class RaceControlEvent(BaseModel):
+    t: float
+    date: str
+    category: str | None = None
+    flag: str | None = None
+    scope: str | None = None
+    sector: int | None = None
+    message: str | None = None
 
 
 class DriverInfo(BaseModel):
@@ -69,6 +80,10 @@ class DatasetManifest(BaseModel):
     readyUntilT: float
     playbackStartChunkIndex: int = 0
     playbackStartT: float = 0.0
+    raceStartT: float = 0.0
+    raceEndT: float | None = None
+    yellowFlags: list[RaceControlEvent] = []
+    redFlags: list[RaceControlEvent] = []
     chunks: list[ChunkInfo]
 
 
