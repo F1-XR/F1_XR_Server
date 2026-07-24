@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from config import DATA_ROOT
+from event_service import attach_replay_events
 
 
 def dataset_dir(dataset_id: str) -> Path:
@@ -37,7 +38,7 @@ def save_manifest(dataset_id: str, manifest: dict) -> None:
 
 
 def load_manifest(dataset_id: str) -> dict:
-    return load_json(manifest_path(dataset_id))
+    return attach_replay_events(load_json(manifest_path(dataset_id)))
 
 
 def save_raw(dataset_id: str, name: str, data: Any) -> None:

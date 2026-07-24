@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import time
@@ -111,6 +111,64 @@ def fetch_stints(session_key: int) -> list[dict]:
         raise
 
 
+def fetch_pit(session_key: int) -> list[dict]:
+    try:
+        return api_get("pit", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_race_control(session_key: int) -> list[dict]:
+    try:
+        return api_get("race_control", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_starting_grid(session_key: int) -> list[dict]:
+    try:
+        starting_grid = api_get(
+            "starting_grid",
+            {"session_key": session_key},
+            retry=1,
+        )
+        if starting_grid:
+            return starting_grid
+    except HTTPError as exc:
+        if exc.code != 404:
+            raise
+
+    try:
+        positions = api_get("position", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+    first_by_driver = {}
+
+    for row in sorted(positions, key=lambda item: str(item.get("date", ""))):
+        driver_number = row.get("driver_number")
+        position = row.get("position")
+
+        if driver_number is None or position is None:
+            continue
+
+        first_by_driver.setdefault(int(driver_number), row)
+
+    return sorted(
+        first_by_driver.values(),
+        key=lambda item: int(item["position"]),
+    )
+
+
 def fetch_location_range(session_key: int, start: datetime, end: datetime) -> list[dict]:
     try:
         return api_get("location", {
@@ -152,16 +210,6 @@ def fetch_position_range(session_key: int, start: datetime, end: datetime) -> li
             "date>=": format_api_date(start),
             "date<": format_api_date(end),
         })
-    except HTTPError as exc:
-        if exc.code == 404:
-            return []
-
-        raise
-
-
-def fetch_race_control(session_key: int) -> list[dict]:
-    try:
-        return api_get("race_control", {"session_key": session_key})
     except HTTPError as exc:
         if exc.code == 404:
             return []

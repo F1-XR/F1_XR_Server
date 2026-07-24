@@ -1,0 +1,24 @@
+{
+  "sessionKey": 9472,
+  "events": [
+    {
+      "eventId": "fixture_9472_overtake_445_rus_lec",
+      "eventType": "Overtake",
+      "anchorTime": 445.177,
+      "startTime": 439.177,
+      "endTime": 450.177,
+      "driverNumbers": [63, 16],
+      "progressStart": -1.0,
+      "progressEnd": -1.0,
+      "confidence": 0.9,
+      "passingSide": "Left",
+      "sideSource": "Manual",
+      "sideConfidence": 1.0,
+      "motionProfile": "Braking",
+      "overtakerShare": 0.5,
+      "defenderShare": 0.5,
+      "displayTitle": "RUS passes LEC",
+      "displayDescription": "Position data changes: RUS P3 to P2, LEC P2 to P3."
+    }
+  ]
+}

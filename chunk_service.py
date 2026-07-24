@@ -4,15 +4,18 @@ import re
 from datetime import timedelta
 from math import ceil
 
+from event_service import build_replay_events, load_replay_events
 from models import CreateDatasetRequest, DatasetManifest, ReplayChunk
 from openf1_client import (
     fetch_car_data_range,
     fetch_drivers,
     fetch_laps,
     fetch_location_range,
+    fetch_pit,
     fetch_position_range,
     fetch_race_control,
     fetch_session_by_key,
+    fetch_starting_grid,
     fetch_stints,
     parse_iso,
 )
@@ -89,6 +92,7 @@ def build_replay_chunk(
     locations: list[dict],
     car_data: list[dict],
     positions: list[dict],
+    starting_grid: list[dict],
     tires: list[dict],
 ) -> dict:
     samples = []
@@ -140,94 +144,14 @@ def build_replay_chunk(
         endT=round(chunk_end_t, 3),
         overlapSeconds=overlap_seconds,
         samples=samples,
-        positions=build_position_samples(replay_start_time, positions),
+        positions=build_position_samples(
+            replay_start_time,
+            positions,
+            starting_grid if chunk_index == 0 else [],
+        ),
         tires=tires,
     ).model_dump()
 
-
-
-def race_control_t(session_start, row: dict) -> float | None:
-    date = row.get("date")
-    if not date:
-        return None
-
-    return max(0.0, (parse_iso(date) - session_start).total_seconds())
-
-
-def race_control_event(session_start, row: dict) -> dict | None:
-    t = race_control_t(session_start, row)
-    if t is None:
-        return None
-
-    sector = row.get("sector")
-    return {
-        "t": round(t, 3),
-        "date": str(row.get("date", "")),
-        "category": row.get("category"),
-        "flag": row.get("flag"),
-        "scope": row.get("scope"),
-        "sector": int(sector) if sector is not None else None,
-        "message": row.get("message"),
-    }
-
-
-def find_race_start_t(session_start, race_control: list[dict], laps: list[dict]) -> float:
-    candidates = []
-
-    for row in race_control:
-        message = str(row.get("message") or "").upper()
-        flag = str(row.get("flag") or "").upper()
-        category = str(row.get("category") or "").upper()
-
-        is_start = (
-            "RACE START" in message
-            or "STARTED" in message
-            or ("GREEN FLAG" in message and "FORMATION" not in message)
-            or (flag == "GREEN" and category == "FLAG" and "PIT EXIT" not in message)
-        )
-
-        if not is_start:
-            continue
-
-        t = race_control_t(session_start, row)
-        if t is not None:
-            candidates.append(t)
-
-    if candidates:
-        return min(candidates)
-
-    return find_first_lap_start_t(session_start, laps)
-
-
-def build_race_control_summary(session_start, race_control: list[dict]) -> tuple[float | None, list[dict], list[dict]]:
-    race_end_t = None
-    yellow_flags = []
-    red_flags = []
-
-    for row in race_control:
-        message = str(row.get("message") or "").upper()
-        flag = str(row.get("flag") or "").upper()
-        event = race_control_event(session_start, row)
-
-        if event is None:
-            continue
-
-        if flag in ("YELLOW", "DOUBLE YELLOW") or "YELLOW FLAG" in message:
-            yellow_flags.append(event)
-
-        if flag == "RED" or "RED FLAG" in message:
-            red_flags.append(event)
-
-        is_end = (
-            "CHEQUERED" in message
-            or "CHECKERED" in message
-            or "SESSION ENDED" in message
-            or "RACE FINISHED" in message
-        )
-        if is_end and (race_end_t is None or event["t"] < race_end_t):
-            race_end_t = event["t"]
-
-    return race_end_t, yellow_flags, red_flags
 
 def create_dataset(request: CreateDatasetRequest) -> dict:
     try:
@@ -237,7 +161,13 @@ def create_dataset(request: CreateDatasetRequest) -> dict:
 
         if cached_manifest is not None:
             print(f"[Cache fallback] dataset session_key={request.sessionKey}: {exc}")
-            return cached_manifest
+            dataset_id = cached_manifest["datasetId"]
+            cached_manifest["events"] = build_replay_events(
+                dataset_id,
+                cached_manifest,
+            )
+            save_manifest(dataset_id, cached_manifest)
+            return load_manifest(dataset_id)
 
         raise
 
@@ -301,10 +231,10 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
     drivers = fetch_drivers(request.sessionKey)
     laps = fetch_laps(request.sessionKey)
     stints = fetch_stints(request.sessionKey)
+    pits = fetch_pit(request.sessionKey)
     race_control = fetch_race_control(request.sessionKey)
-    race_start_t = find_race_start_t(session_start, race_control, laps)
-    race_end_t, yellow_flags, red_flags = build_race_control_summary(session_start, race_control)
-    playback_start_t = max(0.0, race_start_t - float(request.preStartSeconds)) if request.skipWarmupLap else 0.0
+    starting_grid = fetch_starting_grid(request.sessionKey)
+    playback_start_t = find_first_lap_start_t(session_start, laps) if request.skipWarmupLap else 0.0
     duration_seconds = max(0.0, (session_end - session_start).total_seconds())
     requested_duration_seconds = min(
         duration_seconds,
@@ -321,7 +251,9 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
     save_raw(dataset_id, "drivers", drivers)
     save_raw(dataset_id, "laps", laps)
     save_raw(dataset_id, "stints", stints)
+    save_raw(dataset_id, "pit", pits)
     save_raw(dataset_id, "race_control", race_control)
+    save_raw(dataset_id, "starting_grid", starting_grid)
     save_raw(dataset_id, "transform", build_transform_config(session))
 
     chunks = []
@@ -349,6 +281,7 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
         meetingKey=int(session["meeting_key"]),
         sessionName=str(session.get("session_name", "")),
         drivers=build_driver_infos(drivers),
+        events=load_replay_events(int(session["session_key"])),
         chunkMinutes=request.chunkMinutes,
         overlapSeconds=request.overlapSeconds,
         durationSeconds=round(duration_seconds, 3),
@@ -356,14 +289,17 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
         readyUntilT=0.0,
         playbackStartChunkIndex=playback_start_chunk_index,
         playbackStartT=round(playback_start_t, 3),
-        raceStartT=round(race_start_t, 3),
-        raceEndT=round(race_end_t, 3) if race_end_t is not None else None,
-        yellowFlags=yellow_flags,
-        redFlags=red_flags,
+        **build_race_control_summary(
+            session_start,
+            race_control,
+            requested_duration_seconds,
+        ),
         chunks=chunks,
     ).model_dump()
 
     sync_existing_chunks(dataset_id, manifest)
+    seed_cached_starting_grid(dataset_id, starting_grid)
+    manifest["events"] = build_replay_events(dataset_id, manifest)
     save_manifest(dataset_id, manifest)
 
     return load_manifest(dataset_id)
@@ -388,6 +324,7 @@ def download_dataset_chunks(dataset_id: str, start_index: int = 0) -> dict:
         manifest = load_manifest(dataset_id)
         manifest["status"] = "complete"
         manifest["error"] = None
+        manifest["events"] = build_replay_events(dataset_id, manifest)
         update_ready_until(manifest)
         update_playback_start(dataset_id, manifest)
         save_manifest(dataset_id, manifest)
@@ -415,6 +352,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
             manifest["chunks"][chunk_index]["status"] = "ready" if sample_count > 0 else "empty"
             manifest["chunks"][chunk_index]["sampleCount"] = sample_count
             manifest["chunks"][chunk_index]["error"] = None
+            manifest["events"] = build_replay_events(dataset_id, manifest)
             update_ready_until(manifest)
             update_playback_start(dataset_id, manifest)
             save_manifest(dataset_id, manifest)
@@ -427,6 +365,8 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
     session = load_json(raw_path(dataset_id, "session"))
     laps = load_json(raw_path(dataset_id, "laps"))
     stints = load_json(raw_path(dataset_id, "stints"))
+    starting_grid_path = raw_path(dataset_id, "starting_grid")
+    starting_grid = load_json(starting_grid_path) if starting_grid_path.exists() else []
 
     replay_start_time = parse_iso(session["date_start"])
     chunk = manifest["chunks"][chunk_index]
@@ -478,6 +418,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
             locations=locations,
             car_data=car_data,
             positions=positions,
+            starting_grid=starting_grid,
             tires=build_tire_samples(
                 replay_start_time=replay_start_time,
                 chunk_start_t=request_start_t,
@@ -494,6 +435,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
         manifest["chunks"][chunk_index]["status"] = "ready" if sample_count > 0 else "empty"
         manifest["chunks"][chunk_index]["sampleCount"] = sample_count
         manifest["chunks"][chunk_index]["error"] = None
+        manifest["events"] = build_replay_events(dataset_id, manifest)
         update_ready_until(manifest)
         update_playback_start(dataset_id, manifest)
         save_manifest(dataset_id, manifest)
@@ -564,14 +506,12 @@ def build_car_data_index(replay_start_time, car_data: list[dict]) -> dict[int, l
 
         driver_number = int(row["driver_number"])
         key = (driver_number, row.get("date"))
-
         if key in seen:
             continue
 
         seen.add(key)
         sample_time = parse_iso(row["date"])
         t = (sample_time - replay_start_time).total_seconds()
-
         samples_by_driver.setdefault(driver_number, []).append({
             "t": t,
             "rpm": safe_float(row.get("rpm")),
@@ -582,8 +522,8 @@ def build_car_data_index(replay_start_time, car_data: list[dict]) -> dict[int, l
             "drs": safe_int(row.get("drs")),
         })
 
-    for samples in samples_by_driver.values():
-        samples.sort(key=lambda item: item["t"])
+    for driver_samples in samples_by_driver.values():
+        driver_samples.sort(key=lambda item: item["t"])
 
     return samples_by_driver
 
@@ -594,40 +534,27 @@ def find_nearest_car_data(samples: list[dict], t: float) -> dict:
 
     low = 0
     high = len(samples) - 1
-
     while low < high:
         mid = (low + high) // 2
-
         if samples[mid]["t"] < t:
             low = mid + 1
         else:
             high = mid
 
     candidates = [samples[low]]
-
     if low > 0:
         candidates.append(samples[low - 1])
 
     nearest = min(candidates, key=lambda item: abs(item["t"] - t))
-
-    if abs(nearest["t"] - t) > MAX_TELEMETRY_GAP_SECONDS:
-        return {}
-
-    return nearest
+    return nearest if abs(nearest["t"] - t) <= MAX_TELEMETRY_GAP_SECONDS else {}
 
 
 def safe_float(value) -> float:
-    if value is None:
-        return 0.0
-
-    return float(value)
+    return 0.0 if value is None else float(value)
 
 
 def safe_int(value) -> int:
-    if value is None:
-        return 0
-
-    return int(value)
+    return 0 if value is None else int(value)
 
 
 def update_ready_until(manifest: dict) -> None:
@@ -680,34 +607,185 @@ def update_playback_start(dataset_id: str, manifest: dict) -> None:
     manifest["playbackStartT"] = requested_start_t
 
 
-def build_position_samples(replay_start_time, positions: list[dict]) -> list[dict]:
+def build_position_samples(
+    replay_start_time,
+    positions: list[dict],
+    starting_grid: list[dict] | None = None,
+) -> list[dict]:
     samples = []
     seen = set()
 
+    for row in starting_grid or []:
+        driver_number = row.get("driver_number")
+        position = row.get("position")
+
+        if driver_number is None or position is None:
+            continue
+
+        key = (int(driver_number), 0.0, int(position))
+        if key in seen:
+            continue
+
+        seen.add(key)
+        samples.append({
+            "t": 0.0,
+            "driverNumber": int(driver_number),
+            "position": int(position),
+        })
+
     for row in positions:
-        key = (
-            row.get("session_key"),
-            row.get("driver_number"),
-            row.get("date"),
-            row.get("position"),
-        )
+        driver_number = int(row["driver_number"])
+        position = int(row["position"])
+        sample_time = parse_iso(row["date"])
+        t = (sample_time - replay_start_time).total_seconds()
+        key = (driver_number, round(t, 3), position)
 
         if key in seen:
             continue
 
         seen.add(key)
 
-        sample_time = parse_iso(row["date"])
-        t = (sample_time - replay_start_time).total_seconds()
-
         samples.append({
             "t": round(t, 3),
-            "driverNumber": int(row["driver_number"]),
-            "position": int(row["position"]),
+            "driverNumber": driver_number,
+            "position": position,
         })
 
     samples.sort(key=lambda item: (item["driverNumber"], item["t"]))
     return samples
+
+
+def build_race_control_summary(
+    replay_start_time,
+    rows: list[dict],
+    requested_duration_seconds: float,
+) -> dict:
+    events = []
+
+    for row in rows:
+        date = row.get("date")
+        if not date:
+            continue
+
+        t = (parse_iso(date) - replay_start_time).total_seconds()
+        if t < 0.0:
+            continue
+
+        events.append({
+            "startT": round(t, 3),
+            "endT": round(t, 3),
+            "t": round(t, 3),
+            "date": str(date),
+            "category": str(row.get("category") or ""),
+            "flag": str(row.get("flag") or ""),
+            "scope": str(row.get("scope") or ""),
+            "sector": safe_int(row.get("sector")),
+            "message": str(row.get("message") or ""),
+        })
+
+    events.sort(key=lambda item: item["t"])
+
+    race_starts = [
+        event["t"]
+        for event in events
+        if event["category"].lower() == "sessionstatus" and
+        "SESSION STARTED" in event["message"].upper()
+    ]
+    race_ends = [
+        event["t"]
+        for event in events
+        if event["flag"].upper() == "CHEQUERED"
+    ]
+
+    for index, event in enumerate(events):
+        flag = event["flag"].upper()
+        if flag in ("YELLOW", "DOUBLE YELLOW"):
+            event["endT"] = find_flag_end(events, index)
+        elif flag == "RED":
+            event["endT"] = find_red_flag_end(events, index)
+
+    visible_end = max(0.0, float(requested_duration_seconds))
+    race_start_t = race_starts[0] if race_starts else 0.0
+    race_end_t = race_ends[0] if race_ends else 0.0
+
+    return {
+        "raceStartT": round(race_start_t, 3)
+        if race_start_t <= visible_end else 0.0,
+        "raceEndT": round(race_end_t, 3)
+        if 0.0 < race_end_t <= visible_end else 0.0,
+        "yellowFlags": [
+            event
+            for event in events
+            if event["flag"].upper() in ("YELLOW", "DOUBLE YELLOW") and
+            event["t"] <= visible_end
+        ],
+        "redFlags": [
+            event
+            for event in events
+            if event["flag"].upper() == "RED" and
+            event["t"] <= visible_end
+        ],
+    }
+
+
+def find_flag_end(events: list[dict], start_index: int) -> float:
+    start = events[start_index]
+
+    for event in events[start_index + 1:]:
+        flag = event["flag"].upper()
+
+        if flag == "RED":
+            return event["t"]
+
+        if flag != "CLEAR":
+            continue
+
+        if start["scope"].lower() == "track":
+            return event["t"]
+
+        if event["sector"] == start["sector"]:
+            return event["t"]
+
+    return start["t"]
+
+
+def find_red_flag_end(events: list[dict], start_index: int) -> float:
+    start = events[start_index]
+
+    for event in events[start_index + 1:]:
+        if (
+            event["category"].lower() == "sessionstatus" and
+            "SESSION STARTED" in event["message"].upper()
+        ):
+            return event["t"]
+
+    return start["t"]
+
+
+def seed_cached_starting_grid(dataset_id: str, starting_grid: list[dict]) -> None:
+    if not starting_grid or not chunk_exists(dataset_id, 0):
+        return
+
+    chunk = load_chunk(dataset_id, 0)
+    existing_positions = chunk.get("positions", [])
+    seeded_positions = build_position_samples(
+        parse_iso("1970-01-01T00:00:00Z"),
+        [],
+        starting_grid,
+    )
+    seeded_drivers = {
+        int(sample["driverNumber"])
+        for sample in existing_positions
+        if float(sample.get("t", -1.0)) == 0.0
+    }
+
+    for sample in seeded_positions:
+        if int(sample["driverNumber"]) not in seeded_drivers:
+            existing_positions.append(sample)
+
+    existing_positions.sort(key=lambda item: (item["driverNumber"], item["t"]))
+    chunk["positions"] = existing_positions
+    save_chunk(dataset_id, 0, chunk)
 
 
 def build_tire_samples(
@@ -791,7 +869,3 @@ def find_first_lap_start_t(session_start, laps: list[dict]) -> float:
         return 0.0
 
     return max(0.0, (first_lap_start - session_start).total_seconds())
-
-
-
-
