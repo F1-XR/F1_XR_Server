@@ -53,6 +53,7 @@ def build_replay_events(dataset_id: str, manifest: dict) -> list[dict]:
 
     locations = load_raw_chunks(raw_root, "location_chunk_*.json")
     pits = load_raw_file(raw_root / "pit.json")
+    starting_grid = load_raw_file(raw_root / "starting_grid.json")
     session = json.loads(session_path.read_text(encoding="utf-8"))
     replay_start = parse_iso(session["date_start"])
     drivers = driver_labels(manifest.get("drivers", []))
@@ -71,6 +72,7 @@ def build_replay_events(dataset_id: str, manifest: dict) -> list[dict]:
         positions,
         locations,
         pits,
+        starting_grid,
         expected_drivers,
         drivers,
         float(manifest.get("playbackStartT") or 0.0),
@@ -102,6 +104,7 @@ def detect_overtakes(
     position_rows: list[dict],
     location_rows: list[dict],
     pit_rows: list[dict],
+    starting_grid_rows: list[dict],
     expected_drivers: set[int],
     labels: dict[int, str],
     minimum_time: float = 0.0,
@@ -112,6 +115,7 @@ def detect_overtakes(
         replay_start,
         position_rows,
         expected_drivers,
+        starting_grid_rows,
     )
     baseline = find_initialization_end(snapshots)
     if baseline < 0:
@@ -201,6 +205,7 @@ def build_position_snapshots(
     replay_start: datetime,
     rows: list[dict],
     expected_drivers: set[int],
+    starting_grid_rows: list[dict] | None = None,
 ) -> list[tuple[float, dict[int, int]]]:
     updates: dict[float, dict[int, int]] = {}
 
@@ -219,9 +224,18 @@ def build_position_snapshots(
         if previous is None or position < previous:
             by_driver[driver] = position
 
-    state: dict[int, int] = {}
+    state = {
+        int(row["driver_number"]): int(row["position"])
+        for row in starting_grid_rows or []
+        if row.get("driver_number") is not None and
+        row.get("position") is not None and
+        int(row["driver_number"]) in expected_drivers
+    }
     snapshots = []
     expected_positions = set(range(1, len(expected_drivers) + 1))
+
+    if set(state) == expected_drivers and set(state.values()) == expected_positions:
+        snapshots.append((0.0, dict(state)))
 
     for time in sorted(updates):
         state.update(updates[time])
