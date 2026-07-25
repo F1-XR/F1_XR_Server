@@ -131,6 +131,26 @@ def fetch_race_control(session_key: int) -> list[dict]:
         raise
 
 
+def fetch_position(session_key: int) -> list[dict]:
+    try:
+        return api_get("position", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_intervals(session_key: int) -> list[dict]:
+    try:
+        return api_get("intervals", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
 def fetch_starting_grid(session_key: int) -> list[dict]:
     try:
         starting_grid = api_get(

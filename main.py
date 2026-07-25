@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from catalog_service import get_sessions, get_tracks, get_years
 from chunk_service import create_dataset, download_dataset_chunks, prefetch_chunks, prepare_chunk
 from config import CORS_ORIGINS
+from career_service import get_career
+from f1_data_service import RESOURCE_FETCHERS, OpenF1Unavailable, get_resource, search_sessions
 from models import CreateDatasetRequest
 from storage import load_chunk, load_manifest, load_json, raw_path
 
@@ -29,6 +31,47 @@ def health() -> dict:
     return {
         "status": "ok",
     }
+
+
+# ── AI 에이전트용 세션 데이터 게이트웨이 (OpenF1 shape, 캐시 우선) ──
+
+@app.get("/f1/sessions")
+def f1_sessions(
+    year: int,
+    country: str | None = None,
+    circuit: str | None = None,
+    session_name: str | None = None,
+) -> list[dict]:
+    try:
+        return search_sessions(year, country, circuit, session_name)
+    except OpenF1Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/f1/{session_key}/career/{driver_number}")
+def f1_career(session_key: int, driver_number: int) -> dict:
+    try:
+        return get_career(session_key, driver_number)
+    except OpenF1Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/f1/{session_key}/{resource}")
+def f1_resource(
+    session_key: int,
+    resource: str,
+    driver_number: int | None = None,
+) -> list[dict]:
+    if resource not in RESOURCE_FETCHERS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown resource '{resource}'. "
+                   f"allowed: {sorted(RESOURCE_FETCHERS)}",
+        )
+    try:
+        return get_resource(session_key, resource, driver_number)
+    except OpenF1Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.get("/catalog/years")
