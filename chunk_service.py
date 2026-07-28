@@ -154,6 +154,10 @@ def build_replay_chunk(
 
 
 def create_dataset(request: CreateDatasetRequest) -> dict:
+    cached_manifest = find_ready_cached_manifest(request)
+    if cached_manifest is not None:
+        return cached_manifest
+
     try:
         return create_dataset_from_openf1(request)
     except Exception as exc:
@@ -170,6 +174,73 @@ def create_dataset(request: CreateDatasetRequest) -> dict:
             return load_manifest(dataset_id)
 
         raise
+
+
+def find_ready_cached_manifest(request: CreateDatasetRequest) -> dict | None:
+    if not request.skipWarmupLap or not DATA_ROOT.exists():
+        return None
+
+    matches = []
+
+    for dataset_path in DATA_ROOT.iterdir():
+        if not dataset_path.is_dir():
+            continue
+
+        try:
+            manifest = load_manifest(dataset_path.name)
+        except Exception as exc:
+            print(f"[Cache] skipped invalid manifest {dataset_path.name}: {exc}")
+            continue
+
+        if int(manifest.get("sessionKey", -1)) != int(request.sessionKey):
+            continue
+
+        if (
+            int(manifest.get("chunkMinutes", -1)) != int(request.chunkMinutes)
+            or int(manifest.get("overlapSeconds", -1)) != int(request.overlapSeconds)
+            or manifest.get("status") != "complete"
+        ):
+            continue
+
+        playback_start_t = float(manifest.get("playbackStartT") or 0.0)
+        duration_seconds = float(manifest.get("durationSeconds") or 0.0)
+        requested_end_t = min(
+            duration_seconds,
+            playback_start_t + float(request.requestedMinutes) * 60.0,
+        )
+        cached_end_t = float(manifest.get("requestedDurationSeconds") or 0.0)
+
+        if abs(cached_end_t - requested_end_t) > 0.001:
+            continue
+
+        chunks = manifest.get("chunks") or []
+        if not chunks:
+            continue
+
+        chunks_available = all(
+            chunk.get("status") in ("ready", "empty")
+            and chunk_exists(dataset_path.name, int(chunk["index"]))
+            for chunk in chunks
+        )
+        has_samples = any(
+            chunk.get("status") == "ready"
+            and int(chunk.get("sampleCount") or 0) > 0
+            for chunk in chunks
+        )
+
+        if not chunks_available or not has_samples:
+            continue
+
+        matches.append(manifest)
+
+    if not matches:
+        return None
+
+    matches.sort(
+        key=lambda manifest: float(manifest.get("readyUntilT") or 0.0),
+        reverse=True,
+    )
+    return matches[0]
 
 
 def find_cached_manifest(request: CreateDatasetRequest) -> dict | None:

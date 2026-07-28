@@ -61,7 +61,12 @@ def datasets_create(
         manifest = create_dataset(request)
         dataset_id = manifest["datasetId"]
 
-        background_tasks.add_task(download_dataset_chunks, dataset_id, int(manifest.get("playbackStartChunkIndex", 0)))
+        if manifest.get("status") != "complete":
+            background_tasks.add_task(
+                download_dataset_chunks,
+                dataset_id,
+                int(manifest.get("playbackStartChunkIndex", 0)),
+            )
 
         return manifest
 

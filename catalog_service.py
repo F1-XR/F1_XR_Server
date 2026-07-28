@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
+from time import monotonic
 
 from models import SessionOption, TrackOption
 from openf1_client import fetch_sessions
@@ -8,6 +9,9 @@ from storage import DATA_ROOT, load_json, manifest_path, raw_path
 
 
 MIN_YEAR = 2023
+SESSION_CACHE_SECONDS = 300.0
+
+_session_cache: dict[int, tuple[float, list[dict]]] = {}
 
 
 def get_years() -> dict:
@@ -33,7 +37,7 @@ def get_tracks(year: int) -> dict:
         raise ValueError(f"year must be >= {MIN_YEAR}")
 
     try:
-        sessions = fetch_sessions(year)
+        sessions = sessions_for_year(year)
         return tracks_from_sessions(year, sessions)
     except Exception as exc:
         print(f"[Cache fallback] tracks year={year}: {exc}")
@@ -45,11 +49,23 @@ def get_sessions(year: int, circuit_key: int) -> dict:
         raise ValueError(f"year must be >= {MIN_YEAR}")
 
     try:
-        sessions = fetch_sessions(year)
+        sessions = sessions_for_year(year)
         return sessions_from_openf1(year, circuit_key, sessions)
     except Exception as exc:
         print(f"[Cache fallback] sessions year={year}, circuit_key={circuit_key}: {exc}")
         return sessions_from_cache(year, circuit_key)
+
+
+def sessions_for_year(year: int) -> list[dict]:
+    now = monotonic()
+    cached = _session_cache.get(year)
+
+    if cached is not None and now - cached[0] < SESSION_CACHE_SECONDS:
+        return cached[1]
+
+    sessions = fetch_sessions(year)
+    _session_cache[year] = (now, sessions)
+    return sessions
 
 
 def tracks_from_sessions(year: int, sessions: list[dict]) -> dict:
