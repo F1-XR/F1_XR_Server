@@ -22,6 +22,7 @@ from openf1_client import (
     fetch_race_control,
     fetch_sessions,
     fetch_stints,
+    fetch_weather,
 )
 
 
@@ -34,6 +35,7 @@ RESOURCE_FETCHERS = {
     "pit": fetch_pit,
     "stints": fetch_stints,
     "laps": fetch_laps,
+    "weather": fetch_weather,
 }
 
 

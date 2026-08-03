@@ -131,6 +131,18 @@ def fetch_race_control(session_key: int) -> list[dict]:
         raise
 
 
+def fetch_weather(session_key: int) -> list[dict]:
+    """세션 단위 날씨(공기·트랙 온도·습도·강수 등). race_control과 동일하게 가벼운 세션 조회.
+    추월 예측 모델의 track_temperature/air_temperature/humidity/rainfall 피처에 쓰인다."""
+    try:
+        return api_get("weather", {"session_key": session_key})
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
 def fetch_position(session_key: int) -> list[dict]:
     try:
         return api_get("position", {"session_key": session_key})
@@ -213,6 +225,47 @@ def fetch_car_data_range(session_key: int, start: datetime, end: datetime) -> li
     try:
         return api_get("car_data", {
             "session_key": session_key,
+            "date>=": format_api_date(start),
+            "date<": format_api_date(end),
+        })
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_car_data_window(
+    session_key: int, driver_number: int, start: datetime, end: datetime
+) -> list[dict]:
+    """시점 근처 car_data(speed·drs)를 '드라이버 1명 + 짧은 시간창'으로 좁혀 조회.
+    car_data는 세션 전체가 초대용량(수십만~백만 행)이라 절대 통째로 받지 않는다.
+    추월 예측의 speed·drs_active·speed_delta 피처에 쓰인다."""
+    try:
+        return api_get("car_data", {
+            "session_key": session_key,
+            "driver_number": driver_number,
+            "date>=": format_api_date(start),
+            "date<": format_api_date(end),
+        })
+    except HTTPError as exc:
+        if exc.code == 404:
+            return []
+
+        raise
+
+
+def fetch_location_window(
+    session_key: int, driver_number: int, start: datetime, end: datetime
+) -> list[dict]:
+    """시점/랩 구간의 위치 좌표(x·y)를 '드라이버 1명 + 시간창'으로 조회.
+    location도 세션 전체가 초대용량이라 창으로만 받는다. 두 용도:
+      ① 트랙 기준선용 = 깨끗한 한 바퀴 창(경기당 1회)  ② 시점 좌표 = 짧은 창(투영용).
+    추월 예측의 track_progress·sin·cos·segment 피처에 쓰인다."""
+    try:
+        return api_get("location", {
+            "session_key": session_key,
+            "driver_number": driver_number,
             "date>=": format_api_date(start),
             "date<": format_api_date(end),
         })
