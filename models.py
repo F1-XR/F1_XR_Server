@@ -93,6 +93,7 @@ class DatasetManifest(BaseModel):
     sessionKey: int
     meetingKey: int
     sessionName: str
+    baseDate: str = ""   # t=0의 절대시각(ISO). 상대초 t = (절대시각 - baseDate). Unity 시각 변환용.
     drivers: list[DriverInfo] = []
     events: list[ReplayEvent] = Field(default_factory=list)
     chunkMinutes: int

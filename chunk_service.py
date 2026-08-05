@@ -351,6 +351,7 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
         sessionKey=int(session["session_key"]),
         meetingKey=int(session["meeting_key"]),
         sessionName=str(session.get("session_name", "")),
+        baseDate=session_start.isoformat(),   # t=0의 절대시각(ISO) — 상대초↔절대시각 변환 기준
         drivers=build_driver_infos(drivers),
         events=load_replay_events(int(session["session_key"])),
         chunkMinutes=request.chunkMinutes,

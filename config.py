@@ -61,6 +61,11 @@ def get_env_path(name: str, default: Path) -> Path:
 
 
 OPENF1_BASE_URL = get_env("OPENF1_BASE_URL", "https://api.openf1.org/v1")
+JOLPICA_BASE_URL = get_env("JOLPICA_BASE_URL", "https://api.jolpi.ca/ergast/f1")
 OPENF1_REQUEST_TIMEOUT = get_env_int("OPENF1_REQUEST_TIMEOUT", 30)
 CORS_ORIGINS = get_env_list("CORS_ORIGINS", ["*"])
 DATA_ROOT = get_env_path("DATA_ROOT", PROJECT_ROOT / "data" / "api_datasets")
+
+# 세션 단위 원본 데이터(OpenF1 shape) 캐시 루트. AI 에이전트가 여기서 조회한다.
+# 리플레이 청크(DATA_ROOT)와 목적이 달라 폴더를 분리한다.
+F1_CACHE_ROOT = get_env_path("F1_CACHE_ROOT", PROJECT_ROOT / "data" / "f1_cache")
