@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,16 @@ from f1_data_service import RESOURCE_FETCHERS, OpenF1Unavailable, get_resource, 
 from openf1_client import fetch_car_data_window, fetch_location_window
 from models import CreateDatasetRequest
 from storage import load_chunk, load_manifest, load_json, raw_path
+
+
+class HealthCheckLogFilter(logging.Filter):
+    """Keep automatic local health checks out of Uvicorn's access log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return " /health " not in record.getMessage()
+
+
+logging.getLogger("uvicorn.access").addFilter(HealthCheckLogFilter())
 
 
 app = FastAPI(

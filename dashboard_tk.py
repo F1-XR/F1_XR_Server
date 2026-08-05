@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import queue
+import re
 import subprocess
 import sys
-import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 from tkinter import BOTH, DISABLED, END, LEFT, NORMAL, RIGHT, X, Button, Frame, Label, Tk
 from tkinter.scrolledtext import ScrolledText
+
+from server_runtime import SERVER_LOG_PATH, start_server_process
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -24,7 +25,9 @@ class ServerDashboard:
         self.root.geometry("820x520")
 
         self.process: subprocess.Popen[str] | None = None
-        self.log_queue: queue.Queue[str] = queue.Queue()
+        self.server_log_file: object | None = None
+        self.log_position = 0
+        self.pending_connection_reset_trace: list[str] = []
 
         status_frame = Frame(self.root)
         status_frame.pack(fill=X, padx=12, pady=(12, 6))
@@ -57,42 +60,35 @@ class ServerDashboard:
         self.log_text.pack(fill=BOTH, expand=True, padx=12, pady=(0, 12))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(200, self.flush_logs)
-        self.root.after(500, self.check_server_status)
+        self.root.after(200, self.tail_server_log)
+        self.root.after(500, self.schedule_status_check)
+        self.root.after(100, self.show_window)
 
     def run(self) -> None:
         self.write_log("대시보드를 시작했습니다.")
         self.root.mainloop()
 
+    def show_window(self) -> None:
+        """Bring a dashboard opened from the tray into the foreground."""
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(300, lambda: self.root.attributes("-topmost", False))
+        self.root.focus_force()
+
     def start_server(self) -> None:
+        if self.is_server_running():
+            self.write_log("서버가 이미 실행 중입니다.")
+            self.check_server_status()
+            return
+
         if self.process and self.process.poll() is None:
             self.write_log("서버가 이미 실행 중입니다.")
             return
 
-        command = [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "main:app",
-            "--host",
-            HOST,
-            "--port",
-            str(PORT),
-        ]
-
         self.write_log("서버를 시작합니다.")
-        self.process = subprocess.Popen(
-            command,
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-
-        threading.Thread(target=self.read_server_output, daemon=True).start()
+        self.process, self.server_log_file = start_server_process()
         self.root.after(1000, self.check_server_status)
 
     def stop_server(self) -> None:
@@ -132,6 +128,9 @@ class ServerDashboard:
             self.process.wait(timeout=5)
 
         self.write_log("서버가 종료되었습니다.")
+        if self.server_log_file:
+            self.server_log_file.close()
+            self.server_log_file = None
         self.check_server_status()
 
     def find_listening_server_pid(self) -> int | None:
@@ -154,33 +153,102 @@ class ServerDashboard:
 
         return None
 
-    def check_server_status(self) -> None:
+    def check_server_status(self) -> bool:
         try:
             with urllib.request.urlopen(HEALTH_URL, timeout=1.5) as response:
                 if response.status == 200:
                     self.status_indicator.config(fg="green")
                     self.status_label.config(text=f"서버 상태: 실행 중 ({HEALTH_URL})")
-                    return
+                    return True
         except (urllib.error.URLError, TimeoutError):
             pass
 
         self.status_indicator.config(fg="red")
         self.status_label.config(text="서버 상태: 중지됨")
+        return False
 
-    def read_server_output(self) -> None:
-        if not self.process or not self.process.stdout:
+    def schedule_status_check(self) -> None:
+        running = self.check_server_status()
+        self.root.after(2000 if running else 8000, self.schedule_status_check)
+
+    @staticmethod
+    def is_server_running() -> bool:
+        try:
+            with urllib.request.urlopen(HEALTH_URL, timeout=1.5) as response:
+                return response.status == 200
+        except (urllib.error.URLError, TimeoutError):
+            return False
+
+    def tail_server_log(self) -> None:
+        try:
+            if SERVER_LOG_PATH.exists():
+                size = SERVER_LOG_PATH.stat().st_size
+                if size < self.log_position:
+                    self.log_position = 0
+
+                with SERVER_LOG_PATH.open("r", encoding="utf-8", errors="replace") as log_file:
+                    log_file.seek(self.log_position)
+                    for line in log_file:
+                        self.display_server_log_line(line.rstrip())
+                    self.log_position = log_file.tell()
+        finally:
+            self.root.after(300, self.tail_server_log)
+
+    def display_server_log_line(self, line: str) -> None:
+        if self.pending_connection_reset_trace:
+            self.pending_connection_reset_trace.append(line)
+            if "ConnectionResetError: [WinError 10054]" in line:
+                self.write_log("클라이언트 연결이 종료되었습니다.")
+                self.pending_connection_reset_trace.clear()
+            elif not line:
+                for trace_line in self.pending_connection_reset_trace:
+                    self.write_log(self.humanize_server_log(trace_line))
+                self.pending_connection_reset_trace.clear()
             return
 
-        for line in self.process.stdout:
-            self.log_queue.put(line.rstrip())
+        if "Exception in callback _ProactorBasePipeTransport._call_connection_lost()" in line:
+            self.pending_connection_reset_trace.append(line)
+            return
 
-        self.log_queue.put("서버 로그 스트림이 종료되었습니다.")
+        self.write_log(self.humanize_server_log(line))
 
-    def flush_logs(self) -> None:
-        while not self.log_queue.empty():
-            self.write_log(self.log_queue.get_nowait())
+    @staticmethod
+    def humanize_server_log(line: str) -> str:
+        """Translate common server output into concise Korean dashboard messages."""
+        startup_messages = {
+            "Waiting for application startup.": "서버 애플리케이션을 시작하는 중입니다.",
+            "Application startup complete.": "서버가 준비되었습니다.",
+            "Shutting down": "서버를 종료하는 중입니다.",
+            "Waiting for application shutdown.": "서버 종료를 준비하는 중입니다.",
+            "Application shutdown complete.": "서버가 정상적으로 종료되었습니다.",
+        }
+        for source, translated in startup_messages.items():
+            if source in line:
+                return translated
 
-        self.root.after(200, self.flush_logs)
+        if match := re.search(r"Started server process \[(\d+)\]", line):
+            return f"서버 프로세스를 시작했습니다. (PID: {match.group(1)})"
+        if match := re.search(r"Finished server process \[(\d+)\]", line):
+            return f"서버 프로세스가 종료되었습니다. (PID: {match.group(1)})"
+        if "Uvicorn running on " in line:
+            return "서버가 실행 중입니다: " + line.split("Uvicorn running on ", 1)[1].split(" ", 1)[0]
+        if "[Errno 10048]" in line:
+            return "서버 시작 실패: 8000번 포트를 다른 프로그램이 사용 중입니다."
+
+        if match := re.search(r'"([A-Z]+) ([^ ]+) HTTP/[^\"]+" (\d+)', line):
+            return f"요청 완료: {match.group(1)} {match.group(2)} (상태 코드: {match.group(3)})"
+        if line.startswith("[GET] "):
+            return "OpenF1 데이터 요청: " + line[6:]
+        if line.startswith("[OpenF1 HTTP ERROR]"):
+            return "OpenF1 요청 오류: " + line.replace("[OpenF1 HTTP ERROR] ", "")
+        if line.startswith("[OpenF1 URL ERROR]"):
+            return "OpenF1 연결 오류: " + line.replace("[OpenF1 URL ERROR] ", "")
+        if line.startswith("[Cache fallback]"):
+            return "로컬 캐시를 사용합니다: " + line.replace("[Cache fallback] ", "")
+        if line.startswith("[OpenF1] location empty range:"):
+            return "위치 데이터가 없는 구간입니다: " + line.split(":", 1)[1].strip()
+
+        return line
 
     def write_log(self, message: str) -> None:
         self.log_text.config(state=NORMAL)
