@@ -6,12 +6,14 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pystray
 from PIL import Image, ImageDraw
+from server_runtime import start_server_process
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -25,12 +27,12 @@ STARTUP_SHORTCUT = (
     / "F1 XR Server Tray.lnk"
 )
 INSTANCE_MUTEX_NAME = "Local\\F1_XR_Server_Tray"
-STARTUP_MODE = "--startup" in sys.argv
 
 
 class TrayServer:
     def __init__(self) -> None:
         self.process: subprocess.Popen[str] | None = None
+        self.server_log_file: object | None = None
         self.dashboard_process: subprocess.Popen[str] | None = None
         self.monitor_stop = threading.Event()
         self.icon = pystray.Icon(
@@ -92,11 +94,9 @@ class TrayServer:
 
     def toggle_server(self, _: pystray.Icon, __: pystray.MenuItem) -> None:
         running = self.is_server_running()
-        action = "종료" if running else "시작"
-        if not self.confirm_server_action(action):
-            return
-
         if running:
+            if not self.confirm_server_action("종료"):
+                return
             self.stop_server(_, __)
         else:
             self.start_server(_, __)
@@ -144,19 +144,27 @@ class TrayServer:
             self.update_icon()
             return
 
-        self.process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "main:app", "--host", HOST, "--port", str(PORT)],
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        threading.Timer(1.0, self.after_server_start).start()
+        self.process, self.server_log_file = start_server_process()
+        threading.Thread(target=self.wait_for_server_start, daemon=True).start()
 
-    def after_server_start(self) -> None:
-        running = self.is_server_running()
-        self.notify("F1 XR Server", "서버를 시작했습니다." if running else "서버 시작에 실패했습니다.")
-        if running:
-            self.open_dashboard(self.icon, None)
+    def wait_for_server_start(self) -> None:
+        deadline = time.monotonic() + 10.0
+
+        while time.monotonic() < deadline:
+            if self.is_server_running():
+                self.notify("F1 XR Server", "서버를 시작했습니다.")
+                self.open_dashboard(self.icon, None)
+                self.update_icon()
+                return
+
+            if self.process and self.process.poll() is not None:
+                self.notify("F1 XR Server", "서버가 시작되지 않았습니다. 로그를 확인하세요.")
+                self.update_icon()
+                return
+
+            time.sleep(0.25)
+
+        self.notify("F1 XR Server", "서버 시작 시간이 초과되었습니다. 로그를 확인하세요.")
         self.update_icon()
 
     def stop_server(self, _: pystray.Icon, __: pystray.MenuItem) -> None:
@@ -173,6 +181,9 @@ class TrayServer:
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
 
         self.notify("F1 XR Server", "서버를 종료했습니다.")
+        if self.server_log_file:
+            self.server_log_file.close()
+            self.server_log_file = None
         self.close_dashboard()
         self.update_icon()
 
@@ -197,8 +208,6 @@ class TrayServer:
     def start_status_monitor(self, _: pystray.Icon) -> None:
         # Explicitly show the icon once the Windows tray message loop is ready.
         self.icon.visible = True
-        if not STARTUP_MODE:
-            self.open_dashboard(self.icon, None)
         threading.Thread(target=self.monitor_status, daemon=True).start()
 
     def monitor_status(self) -> None:
