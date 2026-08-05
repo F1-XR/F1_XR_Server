@@ -1,5 +1,12 @@
 # F1 XR Server
 
+## Windows system tray
+
+Run `run_tray.bat` to keep F1 XR Server controls in the Windows notification area.
+Right-click the F1 icon to start or stop the server, check its status, open the dashboard,
+or turn the `Windows 시작 시 실행` option on or off. This option starts only the tray app
+when you sign in; the server remains stopped until you choose `서버 시작`.
+
 이 프로젝트는 OpenF1 데이터를 받아 로컬 JSON 청크 API로 제공하는 FastAPI 서버입니다.
 
 ## 대시보드 실행

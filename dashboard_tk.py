@@ -58,7 +58,7 @@ class ServerDashboard:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(200, self.flush_logs)
-        self.root.after(500, self.check_server_status)
+        self.root.after(500, self.schedule_status_check)
 
     def run(self) -> None:
         self.write_log("대시보드를 시작했습니다.")
@@ -154,18 +154,23 @@ class ServerDashboard:
 
         return None
 
-    def check_server_status(self) -> None:
+    def check_server_status(self) -> bool:
         try:
             with urllib.request.urlopen(HEALTH_URL, timeout=1.5) as response:
                 if response.status == 200:
                     self.status_indicator.config(fg="green")
                     self.status_label.config(text=f"서버 상태: 실행 중 ({HEALTH_URL})")
-                    return
+                    return True
         except (urllib.error.URLError, TimeoutError):
             pass
 
         self.status_indicator.config(fg="red")
         self.status_label.config(text="서버 상태: 중지됨")
+        return False
+
+    def schedule_status_check(self) -> None:
+        running = self.check_server_status()
+        self.root.after(2000 if running else 8000, self.schedule_status_check)
 
     def read_server_output(self) -> None:
         if not self.process or not self.process.stdout:
