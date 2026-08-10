@@ -82,6 +82,10 @@ class ReplayEvent(BaseModel):
     defenderShare: float = -1.0
     displayTitle: str = ""
     displayDescription: str = ""
+    lapNumber: int | None = None
+    pitLaneDuration: float = -1.0
+    pitStopDuration: float = -1.0
+    timingSource: str | None = None
 
 
 class DatasetManifest(BaseModel):

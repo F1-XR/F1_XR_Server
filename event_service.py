@@ -21,6 +21,8 @@ OVERTAKE_ANCHOR_LOOKAHEAD_SECONDS = 1.0
 OVERTAKE_ANCHOR_SAMPLE_SECONDS = 0.05
 MAXIMUM_OVERTAKE_DISTANCE = 12.0
 PIT_EVENT_MARGIN_SECONDS = 2.0
+PIT_SHOWCASE_APPROACH_SECONDS = 4.0
+PIT_SHOWCASE_EXIT_SECONDS = 4.0
 SIDE_DIRECTION_WINDOW_SECONDS = 0.6
 SIDE_SAMPLE_OFFSETS = (-0.8, -0.4, 0.0, 0.4, 0.8)
 MINIMUM_SIDE_SIGNAL = 5.0
@@ -47,16 +49,31 @@ def build_replay_events(dataset_id: str, manifest: dict) -> list[dict]:
     if not session_path.exists():
         return fixtures
 
-    positions = load_raw_chunks(raw_root, "position_chunk_*.json")
-    if not positions:
-        return fixtures
-
-    locations = load_raw_chunks(raw_root, "location_chunk_*.json")
     pits = load_raw_file(raw_root / "pit.json")
-    starting_grid = load_raw_file(raw_root / "starting_grid.json")
     session = json.loads(session_path.read_text(encoding="utf-8"))
     replay_start = parse_iso(session["date_start"])
     drivers = driver_labels(manifest.get("drivers", []))
+    minimum_time = float(manifest.get("playbackStartT") or 0.0)
+    maximum_time = float(
+        manifest.get("requestedDurationSeconds") or
+        manifest.get("durationSeconds") or
+        0.0
+    )
+    pit_events = detect_pit_stops(
+        session_key,
+        replay_start,
+        pits,
+        drivers,
+        minimum_time,
+        maximum_time,
+    )
+
+    positions = load_raw_chunks(raw_root, "position_chunk_*.json")
+    if not positions:
+        return merge_events(pit_events, fixtures)
+
+    locations = load_raw_chunks(raw_root, "location_chunk_*.json")
+    starting_grid = load_raw_file(raw_root / "starting_grid.json")
     expected_drivers = set(drivers)
 
     if not expected_drivers:
@@ -75,15 +92,86 @@ def build_replay_events(dataset_id: str, manifest: dict) -> list[dict]:
         starting_grid,
         expected_drivers,
         drivers,
-        float(manifest.get("playbackStartT") or 0.0),
-        float(
-            manifest.get("requestedDurationSeconds") or
-            manifest.get("durationSeconds") or
-            0.0
-        ),
+        minimum_time,
+        maximum_time,
         position_coverage_end(raw_root, manifest),
     )
-    return merge_events(automatic, fixtures)
+    return merge_events(automatic + pit_events, fixtures)
+
+
+def detect_pit_stops(
+    session_key: int,
+    replay_start: datetime,
+    pit_rows: list[dict],
+    labels: dict[int, str],
+    minimum_time: float = 0.0,
+    maximum_time: float = 0.0,
+) -> list[dict]:
+    events = []
+
+    for row in pit_rows:
+        if row.get("date") is None or row.get("driver_number") is None:
+            continue
+
+        lane_duration = row.get("lane_duration")
+        if lane_duration is None:
+            lane_duration = row.get("pit_duration")
+        if lane_duration is None or float(lane_duration) <= 0.0:
+            continue
+
+        driver = int(row["driver_number"])
+        lap_number = row.get("lap_number")
+        if driver <= 0 or lap_number is None:
+            continue
+
+        lane_duration = float(lane_duration)
+        pit_end = relative_time(replay_start, row["date"])
+        pit_start = pit_end - lane_duration
+        if (
+            pit_end < minimum_time or
+            maximum_time > 0.0 and pit_start > maximum_time
+        ):
+            continue
+
+        start_time = max(minimum_time, pit_start - PIT_SHOWCASE_APPROACH_SECONDS)
+        end_time = pit_end + PIT_SHOWCASE_EXIT_SECONDS
+        if maximum_time > 0.0:
+            end_time = min(maximum_time, end_time)
+        if end_time <= start_time:
+            continue
+
+        stop_duration_value = row.get("stop_duration")
+        stop_duration = (
+            float(stop_duration_value)
+            if stop_duration_value is not None and float(stop_duration_value) > 0.0
+            else -1.0
+        )
+        anchor = pit_start + lane_duration * 0.5
+        label = labels.get(driver, str(driver))
+        timing_source = (
+            "OpenF1StopDuration"
+            if stop_duration > 0.0
+            else "OpenF1PitLane"
+        )
+
+        events.append({
+            "eventId": f"pit_{session_key}_{driver}_{int(lap_number)}",
+            "eventType": "PitStop",
+            "anchorTime": round(anchor, 3),
+            "startTime": round(max(0.0, start_time), 3),
+            "endTime": round(end_time, 3),
+            "driverNumbers": [driver],
+            "confidence": 0.95 if stop_duration > 0.0 else 0.7,
+            "motionProfile": "PitStop",
+            "displayTitle": f"{label} PIT STOP",
+            "displayDescription": f"Lap {int(lap_number)} pit lane visit.",
+            "lapNumber": int(lap_number),
+            "pitLaneDuration": round(lane_duration, 3),
+            "pitStopDuration": round(stop_duration, 3),
+            "timingSource": timing_source,
+        })
+
+    return validate_events(events)
 
 
 def attach_replay_events(manifest: dict) -> dict:
