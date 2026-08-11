@@ -43,8 +43,14 @@ def complete_manifest() -> dict:
 
 
 class DatasetCacheTests(unittest.TestCase):
-    def test_complete_matching_cache_skips_openf1(self) -> None:
+    def test_complete_matching_cache_refreshes_stale_events_without_openf1(
+        self,
+    ) -> None:
         cached = complete_manifest()
+        refreshed_events = [{
+            "eventId": "pit_9472_63_12",
+            "eventType": "PitStop",
+        }]
 
         with (
             patch.object(
@@ -56,10 +62,86 @@ class DatasetCacheTests(unittest.TestCase):
                 chunk_service,
                 "create_dataset_from_openf1",
             ) as create_from_openf1,
+            patch.object(
+                chunk_service,
+                "build_replay_events",
+                return_value=refreshed_events,
+            ) as build_events,
+            patch.object(
+                chunk_service,
+                "save_manifest",
+            ) as save_manifest,
         ):
             result = chunk_service.create_dataset(request())
 
         self.assertIs(result, cached)
+        self.assertEqual(result["events"], refreshed_events)
+        self.assertEqual(
+            result["eventBuildVersion"],
+            chunk_service.EVENT_BUILD_VERSION,
+        )
+        build_events.assert_called_once_with("cached", cached)
+        save_manifest.assert_called_once_with("cached", cached)
+        create_from_openf1.assert_not_called()
+
+    def test_current_event_cache_returns_without_rebuilding(self) -> None:
+        cached = complete_manifest()
+        cached["eventBuildVersion"] = chunk_service.EVENT_BUILD_VERSION
+
+        with (
+            patch.object(
+                chunk_service,
+                "find_ready_cached_manifest",
+                return_value=cached,
+            ),
+            patch.object(
+                chunk_service,
+                "build_replay_events",
+            ) as build_events,
+            patch.object(
+                chunk_service,
+                "save_manifest",
+            ) as save_manifest,
+            patch.object(
+                chunk_service,
+                "create_dataset_from_openf1",
+            ) as create_from_openf1,
+        ):
+            result = chunk_service.create_dataset(request())
+
+        self.assertIs(result, cached)
+        build_events.assert_not_called()
+        save_manifest.assert_not_called()
+        create_from_openf1.assert_not_called()
+
+    def test_event_refresh_failure_keeps_ready_cache(self) -> None:
+        cached = complete_manifest()
+
+        with (
+            patch.object(
+                chunk_service,
+                "find_ready_cached_manifest",
+                return_value=cached,
+            ),
+            patch.object(
+                chunk_service,
+                "build_replay_events",
+                side_effect=ValueError("invalid raw event data"),
+            ),
+            patch.object(
+                chunk_service,
+                "save_manifest",
+            ) as save_manifest,
+            patch.object(
+                chunk_service,
+                "create_dataset_from_openf1",
+            ) as create_from_openf1,
+        ):
+            result = chunk_service.create_dataset(request())
+
+        self.assertIs(result, cached)
+        self.assertNotIn("eventBuildVersion", result)
+        save_manifest.assert_not_called()
         create_from_openf1.assert_not_called()
 
     def test_ready_cache_requires_matching_complete_files(self) -> None:

@@ -4,7 +4,11 @@ import re
 from datetime import timedelta
 from math import ceil
 
-from event_service import build_replay_events, load_replay_events
+from event_service import (
+    EVENT_BUILD_VERSION,
+    build_replay_events,
+    load_replay_events,
+)
 from models import CreateDatasetRequest, DatasetManifest, ReplayChunk
 from openf1_client import (
     fetch_car_data_range,
@@ -156,7 +160,7 @@ def build_replay_chunk(
 def create_dataset(request: CreateDatasetRequest) -> dict:
     cached_manifest = find_ready_cached_manifest(request)
     if cached_manifest is not None:
-        return cached_manifest
+        return refresh_cached_manifest_events(cached_manifest)
 
     try:
         return create_dataset_from_openf1(request)
@@ -166,14 +170,31 @@ def create_dataset(request: CreateDatasetRequest) -> dict:
         if cached_manifest is not None:
             print(f"[Cache fallback] dataset session_key={request.sessionKey}: {exc}")
             dataset_id = cached_manifest["datasetId"]
-            cached_manifest["events"] = build_replay_events(
-                dataset_id,
-                cached_manifest,
-            )
+            rebuild_manifest_events(dataset_id, cached_manifest)
             save_manifest(dataset_id, cached_manifest)
             return load_manifest(dataset_id)
 
         raise
+
+
+def refresh_cached_manifest_events(manifest: dict) -> dict:
+    if int(manifest.get("eventBuildVersion") or 0) >= EVENT_BUILD_VERSION:
+        return manifest
+
+    dataset_id = str(manifest["datasetId"])
+    try:
+        rebuild_manifest_events(dataset_id, manifest)
+        save_manifest(dataset_id, manifest)
+    except Exception as exc:
+        print(f"[Cache events] kept existing events for {dataset_id}: {exc}")
+
+    return manifest
+
+
+def rebuild_manifest_events(dataset_id: str, manifest: dict) -> dict:
+    manifest["events"] = build_replay_events(dataset_id, manifest)
+    manifest["eventBuildVersion"] = EVENT_BUILD_VERSION
+    return manifest
 
 
 def find_ready_cached_manifest(request: CreateDatasetRequest) -> dict | None:
@@ -371,7 +392,7 @@ def create_dataset_from_openf1(request: CreateDatasetRequest) -> dict:
 
     sync_existing_chunks(dataset_id, manifest)
     seed_cached_starting_grid(dataset_id, starting_grid)
-    manifest["events"] = build_replay_events(dataset_id, manifest)
+    rebuild_manifest_events(dataset_id, manifest)
     save_manifest(dataset_id, manifest)
 
     return load_manifest(dataset_id)
@@ -396,7 +417,7 @@ def download_dataset_chunks(dataset_id: str, start_index: int = 0) -> dict:
         manifest = load_manifest(dataset_id)
         manifest["status"] = "complete"
         manifest["error"] = None
-        manifest["events"] = build_replay_events(dataset_id, manifest)
+        rebuild_manifest_events(dataset_id, manifest)
         update_ready_until(manifest)
         update_playback_start(dataset_id, manifest)
         save_manifest(dataset_id, manifest)
@@ -424,7 +445,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
             manifest["chunks"][chunk_index]["status"] = "ready" if sample_count > 0 else "empty"
             manifest["chunks"][chunk_index]["sampleCount"] = sample_count
             manifest["chunks"][chunk_index]["error"] = None
-            manifest["events"] = build_replay_events(dataset_id, manifest)
+            rebuild_manifest_events(dataset_id, manifest)
             update_ready_until(manifest)
             update_playback_start(dataset_id, manifest)
             save_manifest(dataset_id, manifest)
@@ -507,7 +528,7 @@ def prepare_chunk(dataset_id: str, chunk_index: int) -> dict:
         manifest["chunks"][chunk_index]["status"] = "ready" if sample_count > 0 else "empty"
         manifest["chunks"][chunk_index]["sampleCount"] = sample_count
         manifest["chunks"][chunk_index]["error"] = None
-        manifest["events"] = build_replay_events(dataset_id, manifest)
+        rebuild_manifest_events(dataset_id, manifest)
         update_ready_until(manifest)
         update_playback_start(dataset_id, manifest)
         save_manifest(dataset_id, manifest)
