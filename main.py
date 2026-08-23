@@ -10,7 +10,13 @@ from catalog_service import get_sessions, get_tracks, get_years
 from chunk_service import create_dataset, download_dataset_chunks, prefetch_chunks, prepare_chunk
 from config import CORS_ORIGINS
 from career_service import get_career
-from f1_data_service import RESOURCE_FETCHERS, OpenF1Unavailable, get_resource, search_sessions
+from f1_data_service import (
+    RESOURCE_FETCHERS,
+    OpenF1Unavailable,
+    get_resource,
+    get_session_metadata,
+    search_sessions,
+)
 from openf1_client import fetch_car_data_window, fetch_location_window
 from models import CreateDatasetRequest
 from storage import load_chunk, load_manifest, load_json, raw_path
@@ -66,6 +72,14 @@ def f1_sessions(
 def f1_career(session_key: int, driver_number: int) -> dict:
     try:
         return get_career(session_key, driver_number)
+    except OpenF1Unavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/f1/{session_key}/metadata")
+def f1_metadata(session_key: int) -> dict:
+    try:
+        return get_session_metadata(session_key)
     except OpenF1Unavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 

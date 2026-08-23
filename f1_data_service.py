@@ -17,10 +17,12 @@ from openf1_client import (
     fetch_drivers,
     fetch_intervals,
     fetch_laps,
+    fetch_meeting_by_key,
     fetch_pit,
     fetch_position,
     fetch_race_control,
     fetch_sessions,
+    fetch_session_by_key,
     fetch_stints,
     fetch_weather,
 )
@@ -49,6 +51,10 @@ def _resource_path(session_key: int, resource: str) -> Path:
 
 def _sessions_path(year: int) -> Path:
     return F1_CACHE_ROOT / "sessions" / f"{year}.json"
+
+
+def _metadata_path(session_key: int) -> Path:
+    return F1_CACHE_ROOT / str(session_key) / "session_metadata.json"
 
 
 def _load(path: Path) -> list[dict]:
@@ -125,3 +131,24 @@ def search_sessions(
         return True
 
     return [session for session in sessions if matches(session)]
+
+
+def get_session_metadata(session_key: int) -> dict:
+    """Return stable session/meeting fields needed by runtime ML features."""
+    path = _metadata_path(session_key)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    try:
+        session = fetch_session_by_key(session_key)
+        meeting_key = session.get("meeting_key")
+        meeting = fetch_meeting_by_key(int(meeting_key)) if meeting_key is not None else {}
+    except Exception as exc:
+        raise OpenF1Unavailable(
+            f"OpenF1 unavailable and no metadata cache for session {session_key}: {exc}"
+        ) from exc
+
+    metadata = {**meeting, **session}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    return metadata

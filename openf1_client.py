@@ -20,7 +20,9 @@ def parse_iso(value: str) -> datetime:
 def format_api_date(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000")
+    # Preserve milliseconds. Truncating every cutoff to ``.000`` made runtime
+    # speed/location almost one second older than the 1 Hz training grid.
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "")
 
 
 def build_query(params: dict) -> str:
@@ -91,6 +93,11 @@ def fetch_session_by_key(session_key: int) -> dict:
         raise RuntimeError(f"Session not found: session_key={session_key}")
 
     return sessions[0]
+
+
+def fetch_meeting_by_key(meeting_key: int) -> dict:
+    meetings = api_get("meetings", {"meeting_key": meeting_key})
+    return meetings[0] if meetings else {}
 
 
 def fetch_drivers(session_key: int) -> list[dict]:
